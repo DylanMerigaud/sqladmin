@@ -140,3 +140,37 @@ def test_get_form_update(client: TestClient) -> None:
 
     assert response.text.count("Currently:") == 1
     assert response.text.count("checkbox") == 0
+
+
+def test_update_without_new_file_keeps_existing_content(client: TestClient) -> None:
+    # Larger than one read buffer, so a rewrite of the file onto itself shows.
+    content = b"a" * 100_000
+    files = {
+        "file": ("file.txt", content),
+        "optional_file": ("optional_file.txt", content),
+    }
+    client.post("/admin/user/create", files=files)
+
+    # What a browser sends for file inputs left untouched: a part with an
+    # empty filename. httpx drops empty filenames, so build the body by hand.
+    boundary = "sqladmin-boundary"
+    body = "".join(
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="{name}"; filename=""\r\n'
+        "Content-Type: application/octet-stream\r\n\r\n\r\n"
+        for name in ("file", "optional_file")
+    )
+    body += f"--{boundary}--\r\n"
+    response = client.post(
+        "/admin/user/edit/1",
+        content=body.encode(),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+
+    user = _query_user()
+    assert user.file.name == "file.txt"
+    assert user.file.open().read() == content
+    assert user.optional_file.name == "optional_file.txt"
+    assert user.optional_file.open().read() == content

@@ -909,6 +909,8 @@ class Admin(BaseAdminView):
             )
 
         form_data_dict = self._denormalize_wtform_data(form.data, model)
+        if not save_as_new:
+            await self._drop_untouched_files(request, model, form_data_dict)
         try:
             if save_as_new:
                 obj = await model_view.insert_model(request, form_data_dict)
@@ -1128,6 +1130,27 @@ class Admin(BaseAdminView):
             else:
                 form_data.append((key, value))
         return FormData(form_data)
+
+    @staticmethod
+    async def _drop_untouched_files(request: Request, obj: Any, data: dict) -> None:
+        """
+        Remove file fields left empty on the edit form from the update data.
+
+        `_handle_form_data` reopens the stored file so the form validates, but
+        writing it back would overwrite the stored file with itself.
+        """
+
+        form = await request.form()
+        for key, value in form.multi_items():
+            if not isinstance(value, UploadFile) or form.get(key + "_checkbox"):
+                continue
+            empty_upload = len(await value.read(1)) != 1
+            await value.seek(0)
+            if not empty_upload or not getattr(obj, key, None):
+                continue
+            upload = data.pop(key, None)
+            if isinstance(upload, UploadFile):
+                await upload.close()
 
     @staticmethod
     def _normalize_wtform_data(obj: Any) -> dict:
