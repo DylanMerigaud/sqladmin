@@ -911,9 +911,11 @@ class Admin(BaseAdminView):
             )
 
         form_data_dict = self._denormalize_wtform_data(form.data, model)
+        copies: list[UploadFile] = []
         for key in stored_files:
             if save_as_new:
-                form_data_dict[key] = self._copy_stored_file(getattr(model, key))
+                copies.append(self._copy_stored_file(getattr(model, key)))
+                form_data_dict[key] = copies[-1]
             else:
                 form_data_dict.pop(key, None)
         try:
@@ -932,6 +934,9 @@ class Admin(BaseAdminView):
                 context,
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
+        finally:
+            for copy in copies:
+                await copy.close()
 
         override = await self._resolve_after_change_response(
             request, context, obj, model_view.edit_template, identity

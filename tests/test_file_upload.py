@@ -2,7 +2,7 @@ import io
 import os
 from collections.abc import Generator
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 import pytest
 from fastapi_storages import FileSystemStorage, StorageFile
@@ -257,6 +257,32 @@ def test_save_as_new_without_new_file_keeps_existing_content(
         assert user.file.open().read() == CONTENT
         assert user.optional_file.name == "optional_file.txt"
         assert user.optional_file.open().read() == CONTENT
+
+
+def test_save_as_new_closes_the_copy_when_insert_fails(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(UserAdmin, "save_as", True)
+    _create_user(client)
+
+    received: dict[str, Any] = {}
+
+    async def insert_model(self: UserAdmin, request: Any, data: dict) -> Any:
+        received.update(data)
+        raise ValueError("insert failed")
+
+    monkeypatch.setattr(UserAdmin, "insert_model", insert_model)
+    response = client.post(
+        "/admin/user/edit/1",
+        **multipart(
+            ("file", "", b""),
+            ("optional_file", "", b""),
+            ("save", None, b"Save as new"),
+        ),
+    )
+    assert response.status_code == 400
+    assert received["file"].file.closed
+    assert received["optional_file"].file.closed
 
 
 def test_update_document_without_new_files(client: TestClient) -> None:
