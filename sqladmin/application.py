@@ -1150,13 +1150,15 @@ class Admin(BaseAdminView):
         """
         Copy a stored file for "Save as new", which writes it again for the
         new row: the storage must not write onto the file it reads from.
+        The copy carries the base name only, since the column type adds its
+        own `upload_to` directory.
         """
 
         copy = tempfile.SpooledTemporaryFile(max_size=1024 * 1024)
         with f.open() as stored:
             shutil.copyfileobj(stored, copy)
         copy.seek(0)
-        return UploadFile(copy, filename=f.name)  # type: ignore[arg-type]
+        return UploadFile(copy, filename=Path(f.name).name)  # type: ignore[arg-type]
 
     @staticmethod
     def _normalize_wtform_data(obj: Any) -> dict:
