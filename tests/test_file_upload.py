@@ -1,5 +1,6 @@
 import io
 import os
+import tempfile
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -283,6 +284,39 @@ def test_save_as_new_closes_the_copy_when_insert_fails(
     assert response.status_code == 400
     assert received["file"].file.closed
     assert received["optional_file"].file.closed
+
+
+def test_save_as_new_closes_the_copy_when_copying_fails(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(UserAdmin, "save_as", True)
+    _create_user(client)
+
+    copies: list[Any] = []
+    spooled = tempfile.SpooledTemporaryFile
+
+    def spooled_temporary_file(*args: Any, **kwargs: Any) -> Any:
+        copies.append(spooled(*args, **kwargs))
+        return copies[-1]
+
+    def copyfileobj(*args: Any) -> None:
+        raise OSError("read failed")
+
+    monkeypatch.setattr(
+        "sqladmin.application.tempfile.SpooledTemporaryFile", spooled_temporary_file
+    )
+    monkeypatch.setattr("sqladmin.application.shutil.copyfileobj", copyfileobj)
+    response = client.post(
+        "/admin/user/edit/1",
+        **multipart(
+            ("file", "", b""),
+            ("optional_file", "", b""),
+            ("save", None, b"Save as new"),
+        ),
+    )
+    assert response.status_code == 400
+    assert copies
+    assert all(copy.closed for copy in copies)
 
 
 def _create_document(client: TestClient) -> bytes:

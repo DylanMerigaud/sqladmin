@@ -1172,7 +1172,11 @@ class Admin(BaseAdminView):
             )
         copy = tempfile.SpooledTemporaryFile(max_size=1024 * 1024)
         with stored:
-            shutil.copyfileobj(stored, copy)
+            try:
+                shutil.copyfileobj(stored, copy)
+            except Exception:
+                copy.close()
+                raise
         copy.seek(0)
         return UploadFile(copy, filename=Path(f.name).name)  # type: ignore[arg-type]
 
