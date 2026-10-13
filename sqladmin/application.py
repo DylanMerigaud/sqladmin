@@ -912,13 +912,13 @@ class Admin(BaseAdminView):
 
         form_data_dict = self._denormalize_wtform_data(form.data, model)
         copies: list[UploadFile] = []
-        for key in stored_files:
-            if save_as_new:
-                copies.append(self._copy_stored_file(getattr(model, key)))
-                form_data_dict[key] = copies[-1]
-            else:
-                form_data_dict.pop(key, None)
         try:
+            for key in stored_files:
+                if save_as_new:
+                    copies.append(self._copy_stored_file(key, getattr(model, key)))
+                    form_data_dict[key] = copies[-1]
+                else:
+                    form_data_dict.pop(key, None)
             if save_as_new:
                 obj = await model_view.insert_model(request, form_data_dict)
             else:
@@ -1151,7 +1151,7 @@ class Admin(BaseAdminView):
         return FormData(form_data), stored_files
 
     @staticmethod
-    def _copy_stored_file(f: Any) -> UploadFile:
+    def _copy_stored_file(key: str, f: Any) -> UploadFile:
         """
         Copy a stored file for "Save as new", which writes it again for the
         new row: the storage must not write onto the file it reads from.
@@ -1159,8 +1159,15 @@ class Admin(BaseAdminView):
         own `upload_to` directory.
         """
 
+        try:
+            stored = f.open()
+        except NotImplementedError:
+            raise ValueError(
+                f"Save as new needs a new upload for {key}: "
+                "its storage cannot read the stored file."
+            )
         copy = tempfile.SpooledTemporaryFile(max_size=1024 * 1024)
-        with f.open() as stored:
+        with stored:
             shutil.copyfileobj(stored, copy)
         copy.seek(0)
         return UploadFile(copy, filename=Path(f.name).name)  # type: ignore[arg-type]

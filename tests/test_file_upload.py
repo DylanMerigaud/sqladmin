@@ -285,7 +285,7 @@ def test_save_as_new_closes_the_copy_when_insert_fails(
     assert received["optional_file"].file.closed
 
 
-def test_update_document_without_new_files(client: TestClient) -> None:
+def _create_document(client: TestClient) -> bytes:
     image = io.BytesIO()
     Image.frombytes("L", (256, 256), os.urandom(256 * 256)).save(image, "PNG")
     files = {
@@ -293,6 +293,11 @@ def test_update_document_without_new_files(client: TestClient) -> None:
         "remote_file": ("remote_file.txt", CONTENT),
     }
     client.post("/admin/document/create", files=files)
+    return image.getvalue()
+
+
+def test_update_document_without_new_files(client: TestClient) -> None:
+    image = _create_document(client)
 
     # The stored files are never opened, so a storage without `open()` works.
     response = client.post(
@@ -304,5 +309,25 @@ def test_update_document_without_new_files(client: TestClient) -> None:
 
     with session_maker() as s:
         document = s.scalar(select(Document))
-    assert Path(document.image.path).read_bytes() == image.getvalue()
+    assert Path(document.image.path).read_bytes() == image
     assert Path(document.remote_file.path).read_bytes() == CONTENT
+
+
+def test_save_as_new_document_asks_for_a_new_upload(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(DocumentAdmin, "save_as", True)
+    _create_document(client)
+
+    response = client.post(
+        "/admin/document/edit/1",
+        **multipart(
+            ("image", "", b""),
+            ("remote_file", "", b""),
+            ("save", None, b"Save as new"),
+        ),
+    )
+    assert response.status_code == 400
+    assert "Save as new needs a new upload for remote_file" in response.text
+    with session_maker() as s:
+        assert [document.id for document in s.scalars(select(Document))] == [1]
