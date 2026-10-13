@@ -17,6 +17,7 @@ from typing import (
 )
 from urllib.parse import parse_qsl, urljoin
 
+import anyio
 from jinja2 import ChoiceLoader, FileSystemLoader, PackageLoader, PrefixLoader
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -915,8 +916,11 @@ class Admin(BaseAdminView):
         try:
             for key in stored_files:
                 if save_as_new:
-                    copies.append(self._copy_stored_file(key, getattr(model, key)))
-                    form_data_dict[key] = copies[-1]
+                    copy = await anyio.to_thread.run_sync(
+                        self._copy_stored_file, key, getattr(model, key)
+                    )
+                    copies.append(copy)
+                    form_data_dict[key] = copy
                 else:
                     form_data_dict.pop(key, None)
             if save_as_new:
@@ -1143,8 +1147,8 @@ class Admin(BaseAdminView):
             elif empty_upload and obj and getattr(obj, key):
                 # Stands in for the stored file so the form validates, without
                 # opening it: `edit()` decides what to write.
-                f = getattr(obj, key)
-                form_data.append((key, UploadFile(io.BytesIO(b""), filename=f.name)))
+                name = Path(getattr(obj, key).name).name
+                form_data.append((key, UploadFile(io.BytesIO(b""), filename=name)))
                 stored_files.append(key)
             else:
                 form_data.append((key, value))
