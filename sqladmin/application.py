@@ -4,6 +4,8 @@ import functools
 import inspect
 import io
 import logging
+import shutil
+import tempfile
 import warnings
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
@@ -818,7 +820,7 @@ class Admin(BaseAdminView):
                 request, model_view.create_template, context
             )
 
-        form_data = await self._handle_form_data(request)
+        form_data, _ = await self._handle_form_data(request)
         form = Form(form_data)
 
         context = {
@@ -888,7 +890,7 @@ class Admin(BaseAdminView):
                 request, model_view.edit_template, context
             )
 
-        form_data = await self._handle_form_data(request, model)
+        form_data, stored_files = await self._handle_form_data(request, model)
         save_as_new = model_view.save_as and _save_button_clicked(
             form_data, "Save as new"
         )
@@ -909,8 +911,11 @@ class Admin(BaseAdminView):
             )
 
         form_data_dict = self._denormalize_wtform_data(form.data, model)
-        if not save_as_new:
-            await self._drop_untouched_files(request, model, form_data_dict)
+        for key in stored_files:
+            if save_as_new:
+                form_data_dict[key] = self._copy_stored_file(getattr(model, key))
+            else:
+                form_data_dict.pop(key, None)
         try:
             if save_as_new:
                 obj = await model_view.insert_model(request, form_data_dict)
@@ -1105,15 +1110,21 @@ class Admin(BaseAdminView):
         return request.url_for("admin:create", identity=identity)
 
     @staticmethod
-    async def _handle_form_data(request: Request, obj: Any = None) -> FormData:
+    async def _handle_form_data(
+        request: Request, obj: Any = None
+    ) -> tuple[FormData, Sequence[str]]:
         """
         Handle form data and modify in case of UploadFile.
         This is needed since in edit page
         there's no way to show current file of object.
+
+        Also returns the keys of file inputs left empty on an object that
+        already has a file: those keep their stored file.
         """
 
         form = await request.form()
         form_data: list[tuple[str, str | UploadFile]] = []
+        stored_files: list[str] = []
         for key, value in form.multi_items():
             if not isinstance(value, UploadFile):
                 form_data.append((key, value))
@@ -1125,32 +1136,27 @@ class Admin(BaseAdminView):
             if should_clear:
                 form_data.append((key, UploadFile(io.BytesIO(b""))))
             elif empty_upload and obj and getattr(obj, key):
-                f = getattr(obj, key)  # In case of update, imitate UploadFile
-                form_data.append((key, UploadFile(filename=f.name, file=f.open())))
+                # Stands in for the stored file so the form validates, without
+                # opening it: `edit()` decides what to write.
+                f = getattr(obj, key)
+                form_data.append((key, UploadFile(io.BytesIO(b""), filename=f.name)))
+                stored_files.append(key)
             else:
                 form_data.append((key, value))
-        return FormData(form_data)
+        return FormData(form_data), stored_files
 
     @staticmethod
-    async def _drop_untouched_files(request: Request, obj: Any, data: dict) -> None:
+    def _copy_stored_file(f: Any) -> UploadFile:
         """
-        Remove file fields left empty on the edit form from the update data.
-
-        `_handle_form_data` reopens the stored file so the form validates, but
-        writing it back would overwrite the stored file with itself.
+        Copy a stored file for "Save as new", which writes it again for the
+        new row: the storage must not write onto the file it reads from.
         """
 
-        form = await request.form()
-        for key, value in form.multi_items():
-            if not isinstance(value, UploadFile) or form.get(key + "_checkbox"):
-                continue
-            empty_upload = len(await value.read(1)) != 1
-            await value.seek(0)
-            if not empty_upload or not getattr(obj, key, None):
-                continue
-            upload = data.pop(key, None)
-            if isinstance(upload, UploadFile):
-                await upload.close()
+        copy = tempfile.SpooledTemporaryFile(max_size=1024 * 1024)
+        with f.open() as stored:
+            shutil.copyfileobj(stored, copy)
+        copy.seek(0)
+        return UploadFile(copy, filename=f.name)  # type: ignore[arg-type]
 
     @staticmethod
     def _normalize_wtform_data(obj: Any) -> dict:

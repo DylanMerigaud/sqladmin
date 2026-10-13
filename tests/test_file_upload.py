@@ -1,9 +1,13 @@
+import io
+import os
 from collections.abc import Generator
 from pathlib import Path
+from typing import BinaryIO
 
 import pytest
 from fastapi_storages import FileSystemStorage, StorageFile
-from fastapi_storages.integrations.sqlalchemy import FileType
+from fastapi_storages.integrations.sqlalchemy import FileType, ImageType
+from PIL import Image
 from sqlalchemy import Column, Integer, select
 from sqlalchemy.orm import declarative_base, sessionmaker
 from starlette.applications import Starlette
@@ -11,6 +15,7 @@ from starlette.testclient import TestClient
 
 from sqladmin import Admin, ModelView
 from sqladmin.fields import FileField
+from tests.common import multipart
 from tests.common import sync_engine as engine
 
 Base = declarative_base()  # type: Any
@@ -26,6 +31,21 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     file = Column(FileType(FileSystemStorage(".uploads")), nullable=False)
     optional_file = Column(FileType(FileSystemStorage(".uploads")), nullable=True)
+
+
+class OpenlessStorage(FileSystemStorage):
+    """Has no `open()`, like `S3Storage` in fastapi-storages."""
+
+    def open(self, name: str) -> BinaryIO:
+        raise NotImplementedError()
+
+
+class Document(Base):
+    __tablename__ = "documents"
+
+    id = Column(Integer, primary_key=True)
+    image = Column(ImageType(FileSystemStorage(".uploads")), nullable=False)
+    remote_file = Column(FileType(OpenlessStorage(".uploads")), nullable=False)
 
 
 @pytest.fixture(autouse=True)
@@ -45,7 +65,16 @@ class UserAdmin(ModelView, model=User):
     form_overrides = {User.file: FileField, User.optional_file: FileField}
 
 
+class DocumentAdmin(ModelView, model=Document):
+    pass
+
+
 admin.add_view(UserAdmin)
+admin.add_view(DocumentAdmin)
+
+
+# Larger than one read buffer, so a rewrite of a file onto itself shows.
+CONTENT = b"a" * 100_000
 
 
 def _query_user() -> User:
@@ -142,35 +171,112 @@ def test_get_form_update(client: TestClient) -> None:
     assert response.text.count("checkbox") == 0
 
 
-def test_update_without_new_file_keeps_existing_content(client: TestClient) -> None:
-    # Larger than one read buffer, so a rewrite of the file onto itself shows.
-    content = b"a" * 100_000
+def _create_user(client: TestClient) -> None:
     files = {
-        "file": ("file.txt", content),
-        "optional_file": ("optional_file.txt", content),
+        "file": ("file.txt", CONTENT),
+        "optional_file": ("optional_file.txt", CONTENT),
     }
     client.post("/admin/user/create", files=files)
 
-    # What a browser sends for file inputs left untouched: a part with an
-    # empty filename. httpx drops empty filenames, so build the body by hand.
-    boundary = "sqladmin-boundary"
-    body = "".join(
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="{name}"; filename=""\r\n'
-        "Content-Type: application/octet-stream\r\n\r\n\r\n"
-        for name in ("file", "optional_file")
-    )
-    body += f"--{boundary}--\r\n"
+
+def test_update_without_new_file_keeps_existing_content(client: TestClient) -> None:
+    _create_user(client)
+
     response = client.post(
         "/admin/user/edit/1",
-        content=body.encode(),
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        **multipart(("file", "", b""), ("optional_file", "", b"")),
         follow_redirects=False,
     )
     assert response.status_code == 302
 
     user = _query_user()
     assert user.file.name == "file.txt"
-    assert user.file.open().read() == content
+    assert user.file.open().read() == CONTENT
     assert user.optional_file.name == "optional_file.txt"
-    assert user.optional_file.open().read() == content
+    assert user.optional_file.open().read() == CONTENT
+
+
+def test_update_clear_with_empty_input(client: TestClient) -> None:
+    _create_user(client)
+
+    response = client.post(
+        "/admin/user/edit/1",
+        **multipart(
+            ("file", "", b""),
+            ("optional_file", "", b""),
+            ("optional_file_checkbox", None, b"on"),
+        ),
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+
+    user = _query_user()
+    assert user.file.open().read() == CONTENT
+    assert user.optional_file is None
+
+
+def test_update_with_new_file_keeps_untouched_one(client: TestClient) -> None:
+    _create_user(client)
+
+    response = client.post(
+        "/admin/user/edit/1",
+        **multipart(("file", "new_file.txt", b"xyz"), ("optional_file", "", b"")),
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+
+    user = _query_user()
+    assert user.file.name == "new_file.txt"
+    assert user.file.open().read() == b"xyz"
+    assert user.optional_file.name == "optional_file.txt"
+    assert user.optional_file.open().read() == CONTENT
+
+
+def test_save_as_new_without_new_file_keeps_existing_content(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(UserAdmin, "save_as", True)
+    _create_user(client)
+
+    response = client.post(
+        "/admin/user/edit/1",
+        **multipart(
+            ("file", "", b""),
+            ("optional_file", "", b""),
+            ("save", None, b"Save as new"),
+        ),
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+
+    with session_maker() as s:
+        users = s.scalars(select(User).order_by(User.id)).all()
+    assert [user.id for user in users] == [1, 2]
+    for user in users:
+        assert user.file.name == "file.txt"
+        assert user.file.open().read() == CONTENT
+        assert user.optional_file.name == "optional_file.txt"
+        assert user.optional_file.open().read() == CONTENT
+
+
+def test_update_document_without_new_files(client: TestClient) -> None:
+    image = io.BytesIO()
+    Image.frombytes("L", (256, 256), os.urandom(256 * 256)).save(image, "PNG")
+    files = {
+        "image": ("image.png", image.getvalue()),
+        "remote_file": ("remote_file.txt", CONTENT),
+    }
+    client.post("/admin/document/create", files=files)
+
+    # The stored files are never opened, so a storage without `open()` works.
+    response = client.post(
+        "/admin/document/edit/1",
+        **multipart(("image", "", b""), ("remote_file", "", b"")),
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+
+    with session_maker() as s:
+        document = s.scalar(select(Document))
+    assert Path(document.image.path).read_bytes() == image.getvalue()
+    assert Path(document.remote_file.path).read_bytes() == CONTENT
