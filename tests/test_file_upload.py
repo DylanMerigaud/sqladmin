@@ -64,6 +64,21 @@ def client() -> Generator[TestClient, None, None]:
         yield c
 
 
+@pytest.fixture
+def opened_files(monkeypatch: pytest.MonkeyPatch) -> list[BinaryIO]:
+    """The handles `FileSystemStorage.open` returns during the test."""
+
+    handles: list[BinaryIO] = []
+    storage_open = FileSystemStorage.open
+
+    def record_open(self: FileSystemStorage, name: str) -> BinaryIO:
+        handles.append(storage_open(self, name))
+        return handles[-1]
+
+    monkeypatch.setattr(FileSystemStorage, "open", record_open)
+    return handles
+
+
 class UserAdmin(ModelView, model=User):
     form_overrides = {User.file: FileField, User.optional_file: FileField}
 
@@ -207,6 +222,7 @@ def test_update_without_new_file_keeps_existing_content(client: TestClient) -> N
 def test_update_without_new_file_validates_stored_content(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
+    opened_files: list[BinaryIO],
     expected: bytes,
     status_code: int,
 ) -> None:
@@ -218,14 +234,6 @@ def test_update_without_new_file_validates_stored_content(
         if file.read() != expected:
             raise ValidationError("Unexpected content.")
 
-    opened: list[BinaryIO] = []
-    storage_open = FileSystemStorage.open
-
-    def record_open(self: FileSystemStorage, name: str) -> BinaryIO:
-        opened.append(storage_open(self, name))
-        return opened[-1]
-
-    monkeypatch.setattr(FileSystemStorage, "open", record_open)
     monkeypatch.setattr(
         UserAdmin, "form_args", {"file": {"validators": [validate_content]}}
     )
@@ -236,8 +244,8 @@ def test_update_without_new_file_validates_stored_content(
     )
     assert response.status_code == status_code
     # Only the file the validator read was opened, and it is closed.
-    assert len(opened) == 1
-    assert opened[0].closed
+    assert len(opened_files) == 1
+    assert opened_files[0].closed
 
     user = _query_user()
     assert user.file.open().read() == CONTENT
@@ -314,6 +322,36 @@ def test_save_as_new_without_new_file_keeps_existing_content(
     )
     assert _query_user().file.open().read() == b"xyz"
     assert Path(new.file.path).read_bytes() == CONTENT
+
+
+def test_save_as_new_asks_for_a_new_upload_when_the_copy_cannot_be_named(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    opened_files: list[BinaryIO],
+) -> None:
+    monkeypatch.setattr(UserAdmin, "save_as", True)
+    _create_user(client)
+
+    def generate_new_filename(self: FileSystemStorage, filename: str) -> str:
+        raise NotImplementedError()
+
+    monkeypatch.setattr(
+        FileSystemStorage, "generate_new_filename", generate_new_filename
+    )
+    response = client.post(
+        "/admin/user/edit/1",
+        **multipart(
+            ("file", "", b""),
+            ("optional_file", "", b""),
+            ("save", None, b"Save as new"),
+        ),
+    )
+    assert response.status_code == 400
+    assert "Save as new needs a new upload for file" in response.text
+    assert opened_files
+    assert all(handle.closed for handle in opened_files)
+    with session_maker() as s:
+        assert [user.id for user in s.scalars(select(User))] == [1]
 
 
 def test_save_as_new_closes_the_copy_when_insert_fails(

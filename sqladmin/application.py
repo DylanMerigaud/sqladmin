@@ -132,15 +132,6 @@ class _StoredFileReader(io.RawIOBase):
         super().close()
 
 
-def _unused_name(storage: Any, name: str) -> str:
-    """Return a name `storage` has no file for yet, or `name` if it cannot tell."""
-
-    try:
-        return storage.generate_new_filename(name)
-    except NotImplementedError:
-        return name
-
-
 class BaseAdmin:
     """Base class for implementing Admin interface.
 
@@ -1227,18 +1218,23 @@ class Admin(BaseAdminView):
         """
 
         f = getattr(obj, key)
+        storage = getattr(type(obj), key).type.storage
+        message = (
+            f"Save as new needs a new upload for {key}: "
+            "its storage cannot copy the stored file."
+        )
         try:
             stored = f.open()
         except NotImplementedError:
-            raise NewUploadRequired(
-                f"Save as new needs a new upload for {key}: "
-                "its storage cannot read the stored file."
-            )
-        copy = tempfile.SpooledTemporaryFile(max_size=1024 * 1024)
+            raise NewUploadRequired(message)
         with stored:
             try:
+                name = storage.generate_new_filename(f.name)
+            except NotImplementedError:
+                raise NewUploadRequired(message)
+            copy = tempfile.SpooledTemporaryFile(max_size=1024 * 1024)
+            try:
                 shutil.copyfileobj(stored, copy)
-                name = _unused_name(getattr(type(obj), key).type.storage, f.name)
             except Exception:
                 copy.close()
                 raise

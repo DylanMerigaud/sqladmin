@@ -23,8 +23,9 @@ class ImproperlyConfigured(SQLAdminException, ValueError):
 class NewUploadRequired(SQLAdminException):
     """Save as new cannot copy a stored file, so that field needs a new upload.
 
-    Raised when the column's storage cannot read the stored file. The edit
-    form shows the message, and it is logged without a stack trace.
+    Raised when the column's storage cannot open the stored file or cannot
+    name a copy of it. The edit form shows the message, and it is logged
+    without a stack trace.
     """
 
 
