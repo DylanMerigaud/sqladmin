@@ -318,13 +318,21 @@ def test_save_as_new_without_new_file_keeps_existing_content(
         assert user.file.open().read() == CONTENT
         assert user.optional_file.open().read() == CONTENT
 
-    # The new row has its own file: replacing the original's leaves it as is.
+    # Each row has its own file: replacing one, under its own name, leaves the
+    # other as is.
     client.post(
         "/admin/user/edit/1",
         **multipart(("file", "file.txt", b"xyz"), ("optional_file", "", b"")),
     )
-    assert _query_user().file.open().read() == b"xyz"
+    assert Path(original.file.path).read_bytes() == b"xyz"
     assert Path(new.file.path).read_bytes() == CONTENT
+
+    client.post(
+        "/admin/user/edit/2",
+        **multipart(("file", new.file.name, b"zyx"), ("optional_file", "", b"")),
+    )
+    assert Path(new.file.path).read_bytes() == b"zyx"
+    assert Path(original.file.path).read_bytes() == b"xyz"
 
 
 def test_save_as_new_asks_for_a_new_upload_when_the_copy_cannot_be_named(
