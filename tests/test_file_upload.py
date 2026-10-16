@@ -297,13 +297,22 @@ def test_save_as_new_without_new_file_keeps_existing_content(
     assert response.status_code == 302
 
     with session_maker() as s:
-        users = s.scalars(select(User).order_by(User.id)).all()
-    assert [user.id for user in users] == [1, 2]
-    for user in users:
-        assert user.file.name == "file.txt"
+        original, new = s.scalars(select(User).order_by(User.id)).all()
+    assert original.file.name == "file.txt"
+    assert original.optional_file.name == "optional_file.txt"
+    assert new.file.name != original.file.name
+    assert new.optional_file.name != original.optional_file.name
+    for user in (original, new):
         assert user.file.open().read() == CONTENT
-        assert user.optional_file.name == "optional_file.txt"
         assert user.optional_file.open().read() == CONTENT
+
+    # The new row has its own file: replacing the original's leaves it as is.
+    client.post(
+        "/admin/user/edit/1",
+        **multipart(("file", "file.txt", b"xyz"), ("optional_file", "", b"")),
+    )
+    assert _query_user().file.open().read() == b"xyz"
+    assert Path(new.file.path).read_bytes() == CONTENT
 
 
 def test_save_as_new_closes_the_copy_when_insert_fails(

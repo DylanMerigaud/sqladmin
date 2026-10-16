@@ -321,8 +321,8 @@ async def test_save_as_new_without_new_file_keeps_existing_content(
     assert response.status_code == 302
 
     async with session_maker() as s:
-        users = (await s.scalars(select(User).order_by(User.id))).all()
-    assert [user.id for user in users] == [1, 2]
-    for user in users:
-        assert user.file.name == "file.txt"
+        original, new = (await s.scalars(select(User).order_by(User.id))).all()
+    assert original.file.name == "file.txt"
+    assert new.file.name != original.file.name
+    for user in (original, new):
         assert Path(user.file.path).read_bytes() == CONTENT

@@ -131,6 +131,15 @@ class _StoredFileReader(io.RawIOBase):
         super().close()
 
 
+def _unused_name(storage: Any, name: str) -> str:
+    """Return a name `storage` has no file for yet, or `name` if it cannot tell."""
+
+    try:
+        return storage.generate_new_filename(name)
+    except NotImplementedError:
+        return name
+
+
 class BaseAdmin:
     """Base class for implementing Admin interface.
 
@@ -964,7 +973,7 @@ class Admin(BaseAdminView):
             for key in stored_files:
                 if save_as_new:
                     copy = await anyio.to_thread.run_sync(
-                        self._copy_stored_file, key, getattr(model, key)
+                        self._copy_stored_file, model, key
                     )
                     copies.append(copy)
                     form_data_dict[key] = copy
@@ -1207,14 +1216,13 @@ class Admin(BaseAdminView):
         return FormData(form_data), stored_files
 
     @staticmethod
-    def _copy_stored_file(key: str, f: Any) -> UploadFile:
+    def _copy_stored_file(obj: Any, key: str) -> UploadFile:
         """
-        Copy a stored file for "Save as new", which writes it again for the
-        new row: the storage must not write onto the file it reads from.
-        The copy carries the base name only, since the column type adds its
-        own `upload_to` directory.
+        Copy a stored file for "Save as new" under a name its storage has no
+        file for yet, so the new row gets its own file.
         """
 
+        f = getattr(obj, key)
         try:
             stored = f.open()
         except NotImplementedError:
@@ -1226,11 +1234,15 @@ class Admin(BaseAdminView):
         with stored:
             try:
                 shutil.copyfileobj(stored, copy)
+                name = _unused_name(getattr(type(obj), key).type.storage, f.name)
             except Exception:
                 copy.close()
                 raise
         copy.seek(0)
-        return UploadFile(copy, filename=Path(f.name).name)  # type: ignore[arg-type]
+        # fastapi-storages 0.5.0 keeps the `upload_to` directory of a column in
+        # the stored name and adds it again on write, so the copy carries the
+        # base name.
+        return UploadFile(copy, filename=Path(name).name)  # type: ignore[arg-type]
 
     @staticmethod
     def _normalize_wtform_data(obj: Any) -> dict:
