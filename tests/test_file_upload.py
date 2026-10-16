@@ -230,7 +230,10 @@ def test_update_without_new_file_validates_stored_content(
 
     def validate_content(form: Any, field: Any) -> None:
         file = field.data.file
+        # What a validator could use on the handle the storage opens.
         assert file.readable() and file.seekable()
+        assert Path(file.name).name == "file.txt"
+        assert os.fstat(file.fileno()).st_size == len(CONTENT)
         if file.read() != expected:
             raise ValidationError("Unexpected content.")
 

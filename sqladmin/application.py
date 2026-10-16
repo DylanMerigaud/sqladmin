@@ -95,8 +95,9 @@ def _save_button_clicked(form: FormData, label: str) -> bool:
 
 class _StoredFileReader(io.RawIOBase):
     """
-    Reads a stored file for the edit form's validators. The file is opened on
-    first use, so an edit whose validators never use it never opens it.
+    Reads a stored file for the edit form's validators, through the handle its
+    storage opens on first use: an edit whose validators never use it never
+    opens it.
     """
 
     def __init__(self, f: Any) -> None:
@@ -108,6 +109,13 @@ class _StoredFileReader(io.RawIOBase):
         if self._handle is None:
             self._handle = self._f.open()
         return self._handle
+
+    @property
+    def name(self) -> str:
+        return self._opened().name
+
+    def fileno(self) -> int:
+        return self._opened().fileno()
 
     def readable(self) -> bool:
         return True
