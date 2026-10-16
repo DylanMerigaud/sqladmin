@@ -12,6 +12,7 @@ from pathlib import Path
 from types import MethodType
 from typing import (
     Any,
+    BinaryIO,
     cast,
     no_type_check,
 )
@@ -89,6 +90,45 @@ def _save_button_clicked(form: FormData, label: str) -> bool:
     """
 
     return form.get("save") in (label, gettext(label))
+
+
+class _StoredFileReader(io.RawIOBase):
+    """
+    Reads a stored file for the edit form's validators. The file is opened on
+    first use, so an edit whose validators never use it never opens it.
+    """
+
+    def __init__(self, f: Any) -> None:
+        super().__init__()
+        self._f = f
+        self._handle: BinaryIO | None = None
+
+    def _opened(self) -> BinaryIO:
+        if self._handle is None:
+            self._handle = self._f.open()
+        return self._handle
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        data = self._opened().read(len(buffer))
+        buffer[: len(data)] = data
+        return len(data)
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        return self._opened().seek(offset, whence)
+
+    def tell(self) -> int:
+        return self._opened().tell()
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._handle.close()
+        super().close()
 
 
 class BaseAdmin:
@@ -903,7 +943,14 @@ class Admin(BaseAdminView):
         form = Form(form_data)
         context["form"] = form
 
-        if not form.validate():
+        try:
+            valid = form.validate()
+        finally:
+            # A validator may have opened a stored file to read it.
+            for key in stored_files:
+                await cast(UploadFile, form_data[key]).close()
+
+        if not valid:
             return await self.templates.TemplateResponse(
                 request,
                 model_view.edit_template,
@@ -1145,10 +1192,15 @@ class Admin(BaseAdminView):
             if should_clear:
                 form_data.append((key, UploadFile(io.BytesIO(b""))))
             elif empty_upload and obj and getattr(obj, key):
-                # Stands in for the stored file so the form validates, without
-                # opening it: `edit()` decides what to write.
-                name = Path(getattr(obj, key).name).name
-                form_data.append((key, UploadFile(io.BytesIO(b""), filename=name)))
+                # Stands in for the stored file so the form validates. It is
+                # opened only when a validator uses it, and `edit()` decides
+                # what to write.
+                f = getattr(obj, key)
+                stand_in = UploadFile(
+                    _StoredFileReader(f),  # type: ignore[arg-type]
+                    filename=Path(f.name).name,
+                )
+                form_data.append((key, stand_in))
                 stored_files.append(key)
             else:
                 form_data.append((key, value))

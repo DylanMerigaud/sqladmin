@@ -8,11 +8,12 @@ from typing import Any, BinaryIO
 import pytest
 from fastapi_storages import FileSystemStorage, StorageFile
 from fastapi_storages.integrations.sqlalchemy import FileType, ImageType
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy import Column, Integer, select
 from sqlalchemy.orm import declarative_base, sessionmaker
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
+from wtforms.validators import ValidationError
 
 from sqladmin import Admin, ModelView
 from sqladmin.fields import FileField
@@ -197,6 +198,51 @@ def test_update_without_new_file_keeps_existing_content(client: TestClient) -> N
     assert user.optional_file.open().read() == CONTENT
 
 
+@pytest.mark.parametrize(
+    ("expected", "status_code"),
+    [(CONTENT, 302), (b"other", 400)],
+    ids=["valid", "invalid"],
+)
+def test_update_without_new_file_validates_stored_content(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    expected: bytes,
+    status_code: int,
+) -> None:
+    _create_user(client)
+
+    def validate_content(form: Any, field: Any) -> None:
+        file = field.data.file
+        assert file.readable() and file.seekable()
+        if file.read() != expected:
+            raise ValidationError("Unexpected content.")
+
+    opened: list[BinaryIO] = []
+    storage_open = FileSystemStorage.open
+
+    def record_open(self: FileSystemStorage, name: str) -> BinaryIO:
+        opened.append(storage_open(self, name))
+        return opened[-1]
+
+    monkeypatch.setattr(FileSystemStorage, "open", record_open)
+    monkeypatch.setattr(
+        UserAdmin, "form_args", {"file": {"validators": [validate_content]}}
+    )
+    response = client.post(
+        "/admin/user/edit/1",
+        **multipart(("file", "", b""), ("optional_file", "", b"")),
+        follow_redirects=False,
+    )
+    assert response.status_code == status_code
+    # Only the file the validator read was opened, and it is closed.
+    assert len(opened) == 1
+    assert opened[0].closed
+
+    user = _query_user()
+    assert user.file.open().read() == CONTENT
+    assert user.optional_file.open().read() == CONTENT
+
+
 def test_update_clear_with_empty_input(client: TestClient) -> None:
     _create_user(client)
 
@@ -330,10 +376,23 @@ def _create_document(client: TestClient) -> bytes:
     return image.getvalue()
 
 
-def test_update_document_without_new_files(client: TestClient) -> None:
+def test_update_document_without_new_files(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     image = _create_document(client)
 
-    # The stored files are never opened, so a storage without `open()` works.
+    def validate_image(form: Any, field: Any) -> None:
+        try:
+            with Image.open(field.data.file) as stored:
+                stored.verify()
+        except UnidentifiedImageError:
+            raise ValidationError("Not an image.")
+
+    # Only a stored file a validator reads is opened, so a storage without
+    # `open()` works when no validator reads its file.
+    monkeypatch.setattr(
+        DocumentAdmin, "form_args", {"image": {"validators": [validate_image]}}
+    )
     response = client.post(
         "/admin/document/edit/1",
         **multipart(("image", "", b""), ("remote_file", "", b"")),
