@@ -1,4 +1,5 @@
 import io
+import logging
 import os
 import tempfile
 from collections.abc import Generator
@@ -416,11 +417,14 @@ def test_update_document_without_new_files(
 
 
 def test_save_as_new_document_asks_for_a_new_upload(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(DocumentAdmin, "save_as", True)
     _create_document(client)
 
+    caplog.set_level(logging.INFO, logger="sqladmin.application")
     response = client.post(
         "/admin/document/edit/1",
         **multipart(
@@ -431,5 +435,9 @@ def test_save_as_new_document_asks_for_a_new_upload(
     )
     assert response.status_code == 400
     assert "Save as new needs a new upload for remote_file" in response.text
+    # An expected answer to the user: logged without a stack trace.
+    [record] = [r for r in caplog.records if r.name == "sqladmin.application"]
+    assert record.levelno == logging.INFO
+    assert record.exc_info is None
     with session_maker() as s:
         assert [document.id for document in s.scalars(select(Document))] == [1]

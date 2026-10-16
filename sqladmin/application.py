@@ -52,6 +52,7 @@ from sqladmin.authorization import (
     custom_action,
 )
 from sqladmin.editors import collect_form_media
+from sqladmin.exceptions import NewUploadRequired
 from sqladmin.flash import get_flashed_messages
 from sqladmin.forms import WTFORMS_ATTRS, WTFORMS_ATTRS_REVERSED
 from sqladmin.helpers import (
@@ -986,7 +987,10 @@ class Admin(BaseAdminView):
                     request, pk=request.path_params["pk"], data=form_data_dict
                 )
         except Exception as e:
-            logger.exception(e)
+            if isinstance(e, NewUploadRequired):
+                logger.info(e)
+            else:
+                logger.exception(e)
             context["error"] = str(e)
             return await self.templates.TemplateResponse(
                 request,
@@ -1226,7 +1230,7 @@ class Admin(BaseAdminView):
         try:
             stored = f.open()
         except NotImplementedError:
-            raise ValueError(
+            raise NewUploadRequired(
                 f"Save as new needs a new upload for {key}: "
                 "its storage cannot read the stored file."
             )
