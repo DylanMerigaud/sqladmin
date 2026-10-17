@@ -51,6 +51,46 @@ class Document(Base):
     remote_file = Column(FileType(OpenlessStorage(".uploads")), nullable=False)
 
 
+class UploadToStorage(FileSystemStorage):
+    """
+    Keeps the directory of a stored name and names a copy in it, as
+    `FileSystemStorage` does in fastapi-storages 0.5.0.
+    """
+
+    def get_name(self, name: str) -> str:
+        return name
+
+    def write(self, file: BinaryIO, name: str) -> str:
+        Path(self.get_path(name)).parent.mkdir(exist_ok=True)
+        return super().write(file, name)
+
+    def generate_new_filename(self, filename: str) -> str:
+        path, counter = Path(filename), 0
+        while Path(self.get_path(str(path))).exists():
+            counter += 1
+            path = path.with_stem(f"{Path(filename).stem}_{counter}")
+        return str(path)
+
+
+class UploadToFileType(FileType):
+    """
+    Writes under `docs/` and keeps it in the stored name, as
+    `FileType(upload_to="docs")` does in fastapi-storages 0.5.0.
+    """
+
+    def process_bind_param(self, value: Any, dialect: Any) -> str | None:
+        if value is not None:
+            value.filename = f"docs/{value.filename}"
+        return super().process_bind_param(value, dialect)
+
+
+class Report(Base):
+    __tablename__ = "reports"
+
+    id = Column(Integer, primary_key=True)
+    file = Column(UploadToFileType(UploadToStorage(".uploads")), nullable=False)
+
+
 @pytest.fixture(autouse=True)
 def prepare_database() -> Generator[None, None, None]:
     Base.metadata.create_all(engine)
@@ -87,8 +127,14 @@ class DocumentAdmin(ModelView, model=Document):
     pass
 
 
+class ReportAdmin(ModelView, model=Report):
+    form_overrides = {Report.file: FileField}
+    save_as = True
+
+
 admin.add_view(UserAdmin)
 admin.add_view(DocumentAdmin)
+admin.add_view(ReportAdmin)
 
 
 # Larger than one read buffer, so a rewrite of a file onto itself shows.
@@ -334,6 +380,30 @@ def test_save_as_new_without_new_file_keeps_existing_content(
     )
     assert Path(new.file.path).read_bytes() == b"zyx"
     assert Path(original.file.path).read_bytes() == b"xyz"
+
+
+def test_save_as_new_copy_stays_in_the_upload_to_directory(
+    client: TestClient,
+) -> None:
+    client.post("/admin/report/create", files={"file": ("file.txt", CONTENT)})
+    names_before = set(os.listdir(".uploads/docs"))
+
+    response = client.post(
+        "/admin/report/edit/1",
+        **multipart(("file", "", b""), ("save", None, b"Save as new")),
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+
+    with session_maker() as s:
+        original, new = s.scalars(select(Report).order_by(Report.id)).all()
+    assert original.file.name == "docs/file.txt"
+    # The column adds `docs/` again on write: the copy is not under docs/docs/,
+    # and takes a name no file had before.
+    assert Path(new.file.name).parent == Path("docs")
+    assert Path(new.file.name).name not in names_before
+    assert Path(new.file.path).read_bytes() == CONTENT
+    assert Path(original.file.path).read_bytes() == CONTENT
 
 
 def test_save_as_new_asks_for_a_new_upload_when_the_copy_cannot_be_named(
