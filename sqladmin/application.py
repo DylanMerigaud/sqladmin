@@ -38,6 +38,7 @@ from starlette.responses import (
 )
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
+from wtforms import ValidationError
 
 from sqladmin._import import handle_import_upload, import_csv, import_error_response
 from sqladmin._menu import CategoryMenu, Menu, ViewMenu
@@ -97,7 +98,8 @@ class _StoredFileReader(io.RawIOBase):
     """
     Reads a stored file for the edit form's validators, through the handle its
     storage opens on first use: an edit whose validators never use it never
-    opens it.
+    opens it. A storage that cannot open it gives the validator a validation
+    error asking for a new upload.
     """
 
     def __init__(self, f: Any) -> None:
@@ -107,7 +109,13 @@ class _StoredFileReader(io.RawIOBase):
 
     def _opened(self) -> BinaryIO:
         if self._handle is None:
-            self._handle = self._f.open()
+            try:
+                self._handle = self._f.open()
+            except NotImplementedError as exc:
+                raise ValidationError(
+                    "This file needs a new upload: "
+                    "its storage cannot read the stored file."
+                ) from exc
         return self._handle
 
     @property

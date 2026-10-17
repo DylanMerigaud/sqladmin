@@ -466,6 +466,31 @@ def test_update_document_without_new_files(
     assert Path(document.remote_file.path).read_bytes() == CONTENT
 
 
+def test_update_document_asks_for_a_new_upload_when_a_validator_reads_it(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _create_document(client)
+
+    def validate_content(form: Any, field: Any) -> None:
+        field.data.file.read()
+
+    monkeypatch.setattr(
+        DocumentAdmin,
+        "form_args",
+        {"remote_file": {"validators": [validate_content]}},
+    )
+    response = client.post(
+        "/admin/document/edit/1",
+        **multipart(("image", "", b""), ("remote_file", "", b"")),
+    )
+    assert response.status_code == 400
+    assert "its storage cannot read the stored file" in response.text
+
+    with session_maker() as s:
+        document = s.scalar(select(Document))
+    assert Path(document.remote_file.path).read_bytes() == CONTENT
+
+
 def test_save_as_new_document_asks_for_a_new_upload(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
