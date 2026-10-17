@@ -1210,7 +1210,7 @@ class Admin(BaseAdminView):
                 f = getattr(obj, key)
                 stand_in = UploadFile(
                     _StoredFileReader(f),  # type: ignore[arg-type]
-                    filename=Path(f.name).name,
+                    filename=f.name,
                 )
                 form_data.append((key, stand_in))
                 stored_files.append(key)

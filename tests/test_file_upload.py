@@ -229,6 +229,7 @@ def test_update_without_new_file_validates_stored_content(
     _create_user(client)
 
     def validate_content(form: Any, field: Any) -> None:
+        assert field.data.filename == "file.txt"
         file = field.data.file
         # What a validator could use on the handle the storage opens.
         assert file.readable() and file.seekable()
